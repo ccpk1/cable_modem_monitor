@@ -16,5 +16,5 @@
     "solentlabs-cable-modem-monitor-core @ git+https://github.com/ccpk1/cable_modem_monitor.git@43fc1bbfba9db6dc302d4daf90ba28ff7ca45433#subdirectory=packages/cable_modem_monitor_core",
     "solentlabs-cable-modem-monitor-catalog @ git+https://github.com/ccpk1/cable_modem_monitor.git@43fc1bbfba9db6dc302d4daf90ba28ff7ca45433#subdirectory=packages/cable_modem_monitor_catalog"
   ],
-  "version": "3.14.0-beta.2"
+  "version": "3.14.0-beta.903"
 }

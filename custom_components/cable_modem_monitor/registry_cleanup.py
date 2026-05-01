@@ -222,7 +222,7 @@ def cleanup_obsolete_upstream_family_entities(
 
     removed_entity_ids: list[str] = []
 
-    for entity_entry in entity_registry.entities.values():
+    for entity_entry in list(entity_registry.entities.values()):
         if entity_entry.platform != DOMAIN:
             continue
 
