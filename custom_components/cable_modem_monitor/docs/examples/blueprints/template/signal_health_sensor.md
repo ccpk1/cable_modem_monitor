@@ -1,4 +1,4 @@
-T## How to Install the Cable Modem Signal Health Sensor
+## How to Install the Cable Modem Signal Health Sensor
 
 This is a Template Blueprint that dynamically creates a sensor which calculates a `Good`, `Fair`, or `Poor` health grade for your modem. It evaluates all downstream/upstream channels, SNR, and error rates against industry-standard and DOCSIS thresholds.
 
