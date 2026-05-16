@@ -1,12 +1,8 @@
 {
   "domain": "cable_modem_monitor",
   "name": "Cable Modem Monitor",
-  "after_dependencies": [
-    "recorder"
-  ],
-  "codeowners": [
-    "@solentlabs"
-  ],
+  "after_dependencies": ["recorder"],
+  "codeowners": ["@solentlabs"],
   "config_flow": true,
   "documentation": "https://github.com/solentlabs/cable_modem_monitor",
   "integration_type": "device",
@@ -17,8 +13,8 @@
     "solentlabs.cable_modem_monitor_catalog"
   ],
   "requirements": [
-    "solentlabs-cable-modem-monitor-core==3.14.0-beta.3",
-    "solentlabs-cable-modem-monitor-catalog==3.14.0-beta.3"
+    "solentlabs-cable-modem-monitor-core @ git+https://github.com/solentlabs/cable_modem_monitor.git@a13bc62af165ae715b98f4d258579635d5a3d7a0#subdirectory=packages/cable_modem_monitor_core",
+    "solentlabs-cable-modem-monitor-catalog @ git+https://github.com/solentlabs/cable_modem_monitor.git@a13bc62af165ae715b98f4d258579635d5a3d7a0#subdirectory=packages/cable_modem_monitor_catalog"
   ],
-  "version": "3.14.0-beta.3"
+  "version": "3.14.0-beta.904"
 }
