@@ -1,0 +1,432 @@
+blueprint:
+  name: Cable Modem Signal Health
+  description: Calculates Good/Fair/Poor grading based on raw modem metrics.
+  domain: template
+  input:
+    # --- HARDWARE SELECTION ---
+    modem_device:
+      name: Modem Device
+      description: The Home Assistant device representing your modem.
+      selector:
+        device:
+
+    # --- SPECIFIC SENSORS ---
+    ds_channel_count:
+      name: Downstream Channel Count Sensor
+      selector:
+        entity:
+          domain: sensor
+    us_channel_count:
+      name: Upstream Channel Count Sensor
+      selector:
+        entity:
+          domain: sensor
+    docsis_status:
+      name: DOCSIS Status Sensor
+      selector:
+        entity:
+          domain: sensor
+    error_rate:
+      name: Uncorrectable Error Rate Sensor
+      selector:
+        entity:
+          domain: sensor
+
+    # --- NAMING PATTERNS (REGEX) ---
+    ds_power_regex:
+      name: Downstream Power Regex
+      description: Regex to match downstream power entities.
+      default: "cable_modem_ds_.*_power$"
+      selector:
+        text:
+    ds_snr_regex:
+      name: Downstream SNR Regex
+      default: "cable_modem_ds_.*_snr$"
+      selector:
+        text:
+    us_power_regex:
+      name: Upstream Power Regex
+      default: "cable_modem_us_.*_power$"
+      selector:
+        text:
+
+    # --- THRESHOLDS ---
+    snr_fair_min:
+      name: SNR Fair Minimum (dB)
+      default: 33.0
+      selector:
+        number:
+          min: 0
+          max: 50
+          step: 0.1
+    snr_poor_min:
+      name: SNR Poor Minimum (dB)
+      default: 25.0
+      selector:
+        number:
+          min: 0
+          max: 50
+          step: 0.1
+    error_rate_fair_max:
+      name: Error Rate Fair Maximum (errors/min)
+      default: 10.0
+      selector:
+        number:
+          min: 0
+          max: 100
+          step: 1.0
+    error_rate_poor_max:
+      name: Error Rate Poor Maximum (errors/min)
+      default: 50.0
+      selector:
+        number:
+          min: 0
+          max: 500
+          step: 1.0
+
+template:
+  - sensor:
+      - name: "Cable Modem Signal Health"
+        icon: mdi:signal
+        # Use literal string replacement for entity IDs
+        availability: >
+          {{
+            states('!input ds_channel_count') not in ['unknown', 'unavailable', 'none']
+            and states('!input us_channel_count') not in ['unknown', 'unavailable', 'none']
+          }}
+        state: >
+          # Use literal string replacement for the device ID and regex
+          {% set entities = device_entities('!input modem_device') %}
+          {% set docsis = states('!input docsis_status') | lower %}
+
+          {% set ds_power_sensors = expand(entities) | selectattr('entity_id', 'search', '!input ds_power_regex') | rejectattr('state', 'in', ['unknown', 'unavailable']) | list %}
+          {% set ds_snr_sensors = expand(entities) | selectattr('entity_id', 'search', '!input ds_snr_regex') | rejectattr('state', 'in', ['unknown', 'unavailable']) | list %}
+          {% set us_power_sensors = expand(entities) | selectattr('entity_id', 'search', '!input us_power_regex') | rejectattr('state', 'in', ['unknown', 'unavailable']) | list %}
+
+          {% set ns = namespace(ds_abs_worst=0.0, ds_values=[], us_grade='good', us_deviation=-1.0, snr_min=none) %}
+
+          {% for s in ds_power_sensors %}
+            {% set lock_status = s.attributes.lock_status | default('', true) | string | lower %}
+            {% if lock_status not in ['not_locked', 'partial_lock', 'unlocked'] %}
+              {% set value = s.state | float(0) %}
+              {% set ns.ds_values = ns.ds_values + [value] %}
+              {% if value | abs > ns.ds_abs_worst %}
+                {% set ns.ds_abs_worst = value | abs %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+
+          {% for s in ds_snr_sensors %}
+            {% set lock_status = s.attributes.lock_status | default('', true) | string | lower %}
+            {% if lock_status not in ['not_locked', 'partial_lock', 'unlocked'] %}
+              {% set value = s.state | float(0) %}
+              {% if ns.snr_min is none or value < ns.snr_min %}
+                {% set ns.snr_min = value %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+
+          {% for s in us_power_sensors %}
+            {% set lock_status = s.attributes.lock_status | default('', true) | string | lower %}
+            {% if lock_status not in ['not_locked', 'partial_lock', 'unlocked'] %}
+              {% set value = s.state | float(0) %}
+              {% set grade = 'poor' if value < 30 or value > 55 else 'fair' if value < 35 or value > 50 else 'good' %}
+              {% set deviation = 35 - value if value < 35 else value - 50 if value > 50 else 0 %}
+              {% if grade == 'poor' and ns.us_grade != 'poor' %}
+                {% set ns.us_grade = 'poor' %}
+                {% set ns.us_deviation = deviation %}
+              {% elif grade == 'poor' and deviation > ns.us_deviation %}
+                {% set ns.us_deviation = deviation %}
+              {% elif grade == 'fair' and ns.us_grade == 'good' %}
+                {% set ns.us_grade = 'fair' %}
+                {% set ns.us_deviation = deviation %}
+              {% elif grade == 'fair' and ns.us_grade == 'fair' and deviation > ns.us_deviation %}
+                {% set ns.us_deviation = deviation %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+
+          {% set ds_power_grade = 'poor' if ns.ds_abs_worst > 15 else 'fair' if ns.ds_abs_worst > 7 else 'good' %}
+          {% set ds_delta = (ns.ds_values | max - ns.ds_values | min) if ns.ds_values | count > 1 else 0 %}
+          {% set ds_delta_grade = 'poor' if ds_delta > 4 else 'fair' if ds_delta > 3 else 'good' %}
+
+          # Injecting the number inputs directly
+          {% set snr_grade = 'good' if ns.snr_min is none else 'poor' if ns.snr_min < !input snr_poor_min else 'fair' if ns.snr_min < !input snr_fair_min else 'good' %}
+
+          {% set err_rate_state = states('!input error_rate') %}
+          {% set err_rate = err_rate_state | float(0) %}
+          {% set error_grade = 'good' if err_rate_state in ['unknown', 'unavailable', 'none'] else 'poor' if err_rate > !input error_rate_poor_max else 'fair' if err_rate > !input error_rate_fair_max else 'good' %}
+
+          {% if docsis not in ['operational', 'locked'] %}
+            poor
+          {% elif 'poor' in [ds_power_grade, ns.us_grade, snr_grade, ds_delta_grade, error_grade] %}
+            poor
+          {% elif 'fair' in [ds_power_grade, ns.us_grade, snr_grade, ds_delta_grade, error_grade] %}
+            fair
+          {% else %}
+            good
+          {% endif %}
+
+        attributes:
+          health_data: >
+            {% set entities = device_entities('!input modem_device') %}
+            {% set docsis = states('!input docsis_status') | lower %}
+            {% set ds_power_sensors = expand(entities) | selectattr('entity_id', 'search', '!input ds_power_regex') | rejectattr('state', 'in', ['unknown', 'unavailable']) | list %}
+            {% set ds_snr_sensors = expand(entities) | selectattr('entity_id', 'search', '!input ds_snr_regex') | rejectattr('state', 'in', ['unknown', 'unavailable']) | list %}
+            {% set us_power_sensors = expand(entities) | selectattr('entity_id', 'search', '!input us_power_regex') | rejectattr('state', 'in', ['unknown', 'unavailable']) | list %}
+            {% set err_rate_state = states('!input error_rate') %}
+            {% set err_rate = err_rate_state | float(0) %}
+
+            {% set ns = namespace(
+              ds_values=[], ds_evaluated=0, us_evaluated=0,
+              ds_power_observed=none, ds_power_channel=none,
+              us_power_observed=none, us_power_channel=none,
+              us_power_grade='good', us_power_deviation=-1.0,
+              snr_observed=none, snr_channel=none,
+              decisive_metric='none', governing_reason='good',
+              final_grade='good', metrics={}, non_good_metrics={}, omitted_metrics=[]
+            ) %}
+
+            {% set docsis_metric = {
+              'grade': 'good' if docsis in ['operational', 'locked'] else 'poor',
+              'observed': docsis,
+              'comparison': 'enum_status',
+              'thresholds': {
+                'good_values': ['operational', 'locked'],
+                'poor_values': ['partial_lock', 'not_locked', 'unknown']
+              }
+            } %}
+            {% set ns.metrics = dict(ns.metrics, **{'docsis_status': docsis_metric}) %}
+            {% if docsis_metric.grade != 'good' %}
+              {% set ns.non_good_metrics = dict(ns.non_good_metrics, **{'docsis_status': docsis_metric.grade}) %}
+              {% set ns.final_grade = 'poor' %}
+              {% set ns.decisive_metric = 'docsis_status' %}
+              {% set ns.governing_reason = 'docsis_' ~ docsis %}
+            {% endif %}
+
+            {% for s in ds_power_sensors %}
+              {% set lock_status = s.attributes.lock_status | default('', true) | string | lower %}
+              {% if lock_status not in ['not_locked', 'partial_lock', 'unlocked'] %}
+                {% set value = s.state | float(0) %}
+                {% set ns.ds_values = ns.ds_values + [value] %}
+                {% set ns.ds_evaluated = ns.ds_evaluated + 1 %}
+                {% if ns.ds_power_observed is none or value | abs > ns.ds_power_observed %}
+                  {% set ns.ds_power_observed = value | abs %}
+                  {% set ns.ds_power_channel = s.entity_id | replace('sensor.cable_modem_', '') | replace('_power', '') %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+
+            {% if ns.ds_evaluated > 0 %}
+              {% set ds_power_grade = 'poor' if ns.ds_power_observed > 15 else 'fair' if ns.ds_power_observed > 7 else 'good' %}
+              {% set ds_power_metric = {
+                'grade': ds_power_grade,
+                'observed': ns.ds_power_observed | round(1),
+                'unit': 'dBmV',
+                'worst_channel': ns.ds_power_channel,
+                'comparison': 'absolute_distance_from_zero',
+                'thresholds': {
+                  'fair_max': 7.0,
+                  'poor_max': 15.0
+                }
+              } %}
+              {% set ns.metrics = dict(ns.metrics, **{'downstream_power': ds_power_metric}) %}
+              {% if ds_power_grade != 'good' %}
+                {% set ns.non_good_metrics = dict(ns.non_good_metrics, **{'downstream_power': ds_power_grade}) %}
+                {% if ns.final_grade != 'poor' and ds_power_grade == 'poor' %}
+                  {% set ns.final_grade = 'poor' %}
+                  {% set ns.decisive_metric = 'downstream_power' %}
+                  {% set ns.governing_reason = 'downstream_power' %}
+                {% elif ns.final_grade == 'good' and ds_power_grade == 'fair' %}
+                  {% set ns.final_grade = 'fair' %}
+                  {% set ns.decisive_metric = 'downstream_power' %}
+                  {% set ns.governing_reason = 'downstream_power' %}
+                {% endif %}
+              {% endif %}
+
+              {% set ds_delta = (ns.ds_values | max - ns.ds_values | min) if ns.ds_values | count > 1 else 0 %}
+              {% set ds_delta_grade = 'poor' if ds_delta > 4 else 'fair' if ds_delta > 3 else 'good' %}
+              {% set ds_delta_metric = {
+                'grade': ds_delta_grade,
+                'observed': ds_delta | round(1),
+                'unit': 'dB',
+                'comparison': 'spread',
+                'thresholds': {
+                  'fair_max': 3.0,
+                  'poor_max': 4.0
+                }
+              } %}
+              {% set ns.metrics = dict(ns.metrics, **{'downstream_power_delta': ds_delta_metric}) %}
+              {% if ds_delta_grade != 'good' %}
+                {% set ns.non_good_metrics = dict(ns.non_good_metrics, **{'downstream_power_delta': ds_delta_grade}) %}
+                {% if ns.final_grade != 'poor' and ds_delta_grade == 'poor' %}
+                  {% set ns.final_grade = 'poor' %}
+                  {% set ns.decisive_metric = 'downstream_power_delta' %}
+                  {% set ns.governing_reason = 'downstream_power_delta' %}
+                {% elif ns.final_grade == 'good' and ds_delta_grade == 'fair' %}
+                  {% set ns.final_grade = 'fair' %}
+                  {% set ns.decisive_metric = 'downstream_power_delta' %}
+                  {% set ns.governing_reason = 'downstream_power_delta' %}
+                {% endif %}
+              {% endif %}
+            {% else %}
+              {% set ns.omitted_metrics = ns.omitted_metrics + ['downstream_power', 'downstream_power_delta'] %}
+            {% endif %}
+
+            {% for s in us_power_sensors %}
+              {% set lock_status = s.attributes.lock_status | default('', true) | string | lower %}
+              {% if lock_status not in ['not_locked', 'partial_lock', 'unlocked'] %}
+                {% set value = s.state | float(0) %}
+                {% set ns.us_evaluated = ns.us_evaluated + 1 %}
+                {% set grade = 'poor' if value < 30 or value > 55 else 'fair' if value < 35 or value > 50 else 'good' %}
+                {% set deviation = 35 - value if value < 35 else value - 50 if value > 50 else 0 %}
+                {% if grade == 'poor' and ns.us_power_grade != 'poor' %}
+                  {% set ns.us_power_grade = 'poor' %}
+                  {% set ns.us_power_deviation = deviation %}
+                  {% set ns.us_power_observed = value %}
+                  {% set ns.us_power_channel = s.entity_id | replace('sensor.cable_modem_', '') | replace('_power', '') %}
+                {% elif grade == 'poor' and deviation > ns.us_power_deviation %}
+                  {% set ns.us_power_deviation = deviation %}
+                  {% set ns.us_power_observed = value %}
+                  {% set ns.us_power_channel = s.entity_id | replace('sensor.cable_modem_', '') | replace('_power', '') %}
+                {% elif grade == 'fair' and ns.us_power_grade == 'good' %}
+                  {% set ns.us_power_grade = 'fair' %}
+                  {% set ns.us_power_deviation = deviation %}
+                  {% set ns.us_power_observed = value %}
+                  {% set ns.us_power_channel = s.entity_id | replace('sensor.cable_modem_', '') | replace('_power', '') %}
+                {% elif grade == 'fair' and ns.us_power_grade == 'fair' and deviation > ns.us_power_deviation %}
+                  {% set ns.us_power_deviation = deviation %}
+                  {% set ns.us_power_observed = value %}
+                  {% set ns.us_power_channel = s.entity_id | replace('sensor.cable_modem_', '') | replace('_power', '') %}
+                {% elif grade == 'good' and ns.us_power_observed is none %}
+                  {% set ns.us_power_observed = value %}
+                  {% set ns.us_power_channel = s.entity_id | replace('sensor.cable_modem_', '') | replace('_power', '') %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+
+            {% if ns.us_evaluated > 0 %}
+              {% set us_power_metric = {
+                'grade': ns.us_power_grade,
+                'observed': ns.us_power_observed | round(1),
+                'unit': 'dBmV',
+                'worst_channel': ns.us_power_channel,
+                'comparison': 'inclusive_range',
+                'thresholds': {
+                  'good_min': 35.0,
+                  'good_max': 50.0,
+                  'poor_min': 30.0,
+                  'poor_max': 55.0
+                }
+              } %}
+              {% set ns.metrics = dict(ns.metrics, **{'upstream_power': us_power_metric}) %}
+              {% if ns.us_power_grade != 'good' %}
+                {% set ns.non_good_metrics = dict(ns.non_good_metrics, **{'upstream_power': ns.us_power_grade}) %}
+                {% set us_reason = 'upstream_power_low' if ns.us_power_observed < 35 else 'upstream_power_high' %}
+                {% if ns.final_grade != 'poor' and ns.us_power_grade == 'poor' %}
+                  {% set ns.final_grade = 'poor' %}
+                  {% set ns.decisive_metric = 'upstream_power' %}
+                  {% set ns.governing_reason = us_reason %}
+                {% elif ns.final_grade == 'good' and ns.us_power_grade == 'fair' %}
+                  {% set ns.final_grade = 'fair' %}
+                  {% set ns.decisive_metric = 'upstream_power' %}
+                  {% set ns.governing_reason = us_reason %}
+                {% endif %}
+              {% endif %}
+            {% else %}
+              {% set ns.omitted_metrics = ns.omitted_metrics + ['upstream_power'] %}
+            {% endif %}
+
+            {% for s in ds_snr_sensors %}
+              {% set lock_status = s.attributes.lock_status | default('', true) | string | lower %}
+              {% if lock_status not in ['not_locked', 'partial_lock', 'unlocked'] %}
+                {% set value = s.state | float(0) %}
+                {% if ns.snr_observed is none or value < ns.snr_observed %}
+                  {% set ns.snr_observed = value %}
+                  {% set ns.snr_channel = s.entity_id | replace('sensor.cable_modem_', '') | replace('_snr', '') %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+
+            {% if ns.snr_observed is not none %}
+              # Injecting Blueprint inputs for the logic evaluation
+              {% set snr_grade = 'poor' if ns.snr_observed < !input snr_poor_min else 'fair' if ns.snr_observed < !input snr_fair_min else 'good' %}
+              {% set snr_metric = {
+                'grade': snr_grade,
+                'observed': ns.snr_observed | round(1),
+                'unit': 'dB',
+                'worst_channel': ns.snr_channel,
+                'comparison': 'minimum_floor',
+                'thresholds': {
+                  # Injecting Blueprint inputs into the JSON payload
+                  'fair_min': !input snr_fair_min,
+                  'poor_min': !input snr_poor_min
+                }
+              } %}
+              {% set ns.metrics = dict(ns.metrics, **{'snr': snr_metric}) %}
+              {% if snr_grade != 'good' %}
+                {% set ns.non_good_metrics = dict(ns.non_good_metrics, **{'snr': snr_grade}) %}
+                {% if ns.final_grade != 'poor' and snr_grade == 'poor' %}
+                  {% set ns.final_grade = 'poor' %}
+                  {% set ns.decisive_metric = 'snr' %}
+                  {% set ns.governing_reason = 'snr' %}
+                {% elif ns.final_grade == 'good' and snr_grade == 'fair' %}
+                  {% set ns.final_grade = 'fair' %}
+                  {% set ns.decisive_metric = 'snr' %}
+                  {% set ns.governing_reason = 'snr' %}
+                {% endif %}
+              {% endif %}
+            {% else %}
+              {% set ns.omitted_metrics = ns.omitted_metrics + ['snr'] %}
+            {% endif %}
+
+            {% if err_rate_state not in ['unknown', 'unavailable', 'none'] %}
+              # Injecting Blueprint inputs for the logic evaluation
+              {% set error_grade = 'poor' if err_rate > !input error_rate_poor_max else 'fair' if err_rate > !input error_rate_fair_max else 'good' %}
+              {% set error_metric = {
+                'grade': error_grade,
+                'observed': err_rate | round(1),
+                'unit': 'errors_per_min',
+                'comparison': 'rate',
+                'window_seconds': 600,
+                'baseline_established': true,
+                'provisional': false,
+                'source': 'derivative_sensor',
+                'thresholds': {
+                  # Injecting Blueprint inputs into the JSON payload
+                  'fair_max': !input error_rate_fair_max,
+                  'poor_max': !input error_rate_poor_max
+                }
+              } %}
+              {% set ns.metrics = dict(ns.metrics, **{'error_rate': error_metric}) %}
+              {% if error_grade != 'good' %}
+                {% set ns.non_good_metrics = dict(ns.non_good_metrics, **{'error_rate': error_grade}) %}
+                {% if ns.final_grade != 'poor' and error_grade == 'poor' %}
+                  {% set ns.final_grade = 'poor' %}
+                  {% set ns.decisive_metric = 'error_rate' %}
+                  {% set ns.governing_reason = 'error_rate' %}
+                {% elif ns.final_grade == 'good' and error_grade == 'fair' %}
+                  {% set ns.final_grade = 'fair' %}
+                  {% set ns.decisive_metric = 'error_rate' %}
+                  {% set ns.governing_reason = 'error_rate' %}
+                {% endif %}
+              {% endif %}
+            {% else %}
+              {% set ns.omitted_metrics = ns.omitted_metrics + ['error_rate'] %}
+            {% endif %}
+
+            {% set payload = {
+              'grade': ns.final_grade,
+              'decisive_metric': ns.decisive_metric,
+              'governing_reason': ns.governing_reason,
+              'non_good_metrics': ns.non_good_metrics,
+              'channel_counts': {
+                'downstream_evaluated': ns.ds_evaluated,
+                'upstream_evaluated': ns.us_evaluated
+              },
+              'metrics': ns.metrics,
+              'omitted_metrics': ns.omitted_metrics,
+              'evaluated_at': now().isoformat()
+            } %}
+
+            {{ payload | to_json | from_json }}
